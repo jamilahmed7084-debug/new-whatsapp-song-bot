@@ -1,3 +1,4 @@
+const http = require('http');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -11,29 +12,57 @@ const P = require('pino');
 const fs = require('fs');
 const path = require('path');
 
+const PORT = Number(process.env.PORT) || 10000;
 const PHONE_NUMBER = process.env.PAIR_PHONE;
 
 const AUTH_DIR = path.join(__dirname, 'auth_info');
 const TEMP_DIR = path.join(__dirname, 'temp');
 
-if (!fs.existsSync(AUTH_DIR)) {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
-}
+fs.mkdirSync(AUTH_DIR, { recursive: true });
+fs.mkdirSync(TEMP_DIR, { recursive: true });
 
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
-}
+/*
+========================================
+RENDER HEALTH SERVER
+========================================
+*/
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8'
+  });
+
+  res.end('Jamil Ahmed Song Bot is running.\n');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 HTTP server listening on port ${PORT}`);
+});
+
+/*
+========================================
+WHATSAPP BOT
+========================================
+*/
 
 let pairingStarted = false;
-let reconnecting = false;
+let starting = false;
 
 async function startBot() {
+  if (starting) return;
+
+  starting = true;
+
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { state, saveCreds } =
+      await useMultiFileAuthState(AUTH_DIR);
 
-    let version;
+    let version = null;
 
-    // Get the current WhatsApp Web version first
+    /*
+    Get current WhatsApp Web version
+    */
+
     try {
       const live = await fetchLatestWaWebVersion();
 
@@ -43,133 +72,148 @@ async function startBot() {
         console.log(
           `🌐 Live WhatsApp Web version: ${version.join('.')}`
         );
-
-        console.log(
-          `📌 Live version status: ${live.isLatest ? 'true' : 'false'}`
-        );
       }
     } catch (err) {
       console.log(
-        '⚠️ Live WhatsApp version fetch failed:',
+        '⚠️ Live version failed:',
         err.message
       );
     }
 
-    // Fallback to Baileys version
+    /*
+    Fallback
+    */
+
     if (!version) {
       try {
-        const latest = await fetchLatestBaileysVersion();
+        const latest =
+          await fetchLatestBaileysVersion();
 
         if (latest?.version) {
           version = latest.version;
 
           console.log(
-            `📦 Baileys fallback version: ${version.join('.')}`
+            `📦 Baileys version: ${version.join('.')}`
           );
         }
       } catch (err) {
         console.log(
-          '⚠️ Baileys version fetch failed:',
+          '⚠️ Version fallback failed:',
           err.message
         );
       }
     }
 
-    const socketConfig = {
+    const config = {
       auth: state,
-      logger: P({ level: 'silent' }),
 
-      // QR completely disabled
+      logger: P({
+        level: 'silent'
+      }),
+
       printQRInTerminal: false,
 
-      // Desktop browser identity
       browser: Browsers.macOS('Chrome'),
 
-      // Helps prevent unnecessary online presence
       markOnlineOnConnect: false
     };
 
     if (version) {
-      socketConfig.version = version;
+      config.version = version;
     }
 
     console.log('🔌 Creating WhatsApp socket...');
 
-    const sock = makeWASocket(socketConfig);
+    const sock = makeWASocket(config);
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on(
+      'creds.update',
+      saveCreds
+    );
 
-    sock.ev.on('connection.update', async (update) => {
-      const {
-        connection,
-        lastDisconnect
-      } = update;
+    /*
+    ========================================
+    CONNECTION
+    ========================================
+    */
 
-      if (connection === 'connecting') {
-        console.log('🔌 Connecting to WhatsApp...');
-      }
+    sock.ev.on(
+      'connection.update',
+      async (update) => {
+        const {
+          connection,
+          lastDisconnect
+        } = update;
 
-      if (connection === 'open') {
-        console.log('');
-        console.log('╔════════════════════════════════════╗');
-        console.log('║   ✅ JAMIL AHMED SONG BOT         ║');
-        console.log('║   WhatsApp Connected Successfully ║');
-        console.log('╚════════════════════════════════════╝');
-        console.log('');
-
-        pairingStarted = false;
-        reconnecting = false;
-      }
-
-      if (connection === 'close') {
-        const statusCode =
-          lastDisconnect?.error?.output?.statusCode;
-
-        console.log(
-          '❌ WhatsApp connection closed:',
-          statusCode || 'unknown'
-        );
-
-        // Logged out
-        if (statusCode === DisconnectReason.loggedOut) {
+        if (connection === 'connecting') {
           console.log(
-            '⚠️ WhatsApp session logged out.'
+            '🔌 Connecting to WhatsApp...'
           );
-
-          console.log(
-            '🗑️ Delete auth_info and pair again.'
-          );
-
-          return;
         }
 
-        // 405 usually means WhatsApp rejected the client/session
-        if (statusCode === 405) {
-          console.log('');
-          console.log(
-            '⚠️ WhatsApp returned 405.'
-          );
-          console.log(
-            '📌 The bot is using the latest WhatsApp Web version.'
-          );
-          console.log(
-            '📌 If 405 continues, the hosting/server connection may be rejected by WhatsApp.'
-          );
-          console.log('');
+        if (connection === 'open') {
+          starting = false;
+          pairingStarted = false;
 
-          return;
+          console.log('');
+          console.log(
+            '╔════════════════════════════════════╗'
+          );
+          console.log(
+            '║   ✅ JAMIL AHMED SONG BOT         ║'
+          );
+          console.log(
+            '║   WhatsApp Connected Successfully ║'
+          );
+          console.log(
+            '╚════════════════════════════════════╝'
+          );
+          console.log('');
         }
 
-        // Prevent duplicate reconnects
-        if (!reconnecting) {
-          reconnecting = true;
+        if (connection === 'close') {
+          starting = false;
+
+          const statusCode =
+            lastDisconnect?.error?.output?.statusCode;
 
           console.log(
-            '🔄 Reconnecting in 5 seconds...'
+            '❌ WhatsApp connection closed:',
+            statusCode || 'unknown'
           );
+
+          if (
+            statusCode ===
+            DisconnectReason.loggedOut
+          ) {
+            console.log(
+              '⚠️ WhatsApp session logged out.'
+            );
+
+            console.log(
+              '📱 Delete auth_info and pair again.'
+            );
+
+            return;
+          }
+
+          /*
+          Do not repeatedly reconnect on 405.
+          */
+
+          if (statusCode === 405) {
+            console.log(
+              '⚠️ WhatsApp rejected the connection with 405.'
+            );
+
+            return;
+          }
+
+          /*
+          Reconnect after temporary errors.
+          */
 
           setTimeout(() => {
-            reconnecting = false;
             startBot().catch((err) => {
               console.log(
                 '❌ Reconnect error:',
@@ -178,121 +222,158 @@ async function startBot() {
             });
           }, 5000);
         }
-      }
 
-      // Phone pairing only — NO QR
-      if (
-        !state.creds.registered &&
-        PHONE_NUMBER &&
-        !pairingStarted &&
-        connection !== 'close'
-      ) {
-        pairingStarted = true;
+        /*
+        ========================================
+        PHONE PAIRING ONLY
+        ========================================
+        */
 
-        try {
-          console.log('');
-          console.log(
-            '📱 Preparing phone pairing...'
-          );
+        if (
+          !state.creds.registered &&
+          PHONE_NUMBER &&
+          !pairingStarted &&
+          connection !== 'close'
+        ) {
+          pairingStarted = true;
 
-          await new Promise(resolve =>
-            setTimeout(resolve, 2500)
-          );
-
-          const cleanPhone =
-            PHONE_NUMBER.replace(/\D/g, '');
-
-          const code =
-            await sock.requestPairingCode(
-              cleanPhone
+          try {
+            console.log('');
+            console.log(
+              '📱 Preparing phone pairing...'
             );
 
-          console.log('');
-          console.log(
-            '╔════════════════════════════════╗'
-          );
-          console.log(
-            '║     JAMIL AHMED SONG BOT       ║'
-          );
-          console.log(
-            '╠════════════════════════════════╣'
-          );
-          console.log(
-            '║ Pairing Code: ' + code
-          );
-          console.log(
-            '╚════════════════════════════════╝'
-          );
-          console.log('');
-        } catch (err) {
-          console.log(
-            '❌ Pairing error:',
-            err.message
-          );
+            await new Promise(
+              resolve =>
+                setTimeout(resolve, 2500)
+            );
 
-          pairingStarted = false;
+            const phone =
+              PHONE_NUMBER.replace(
+                /\D/g,
+                ''
+              );
+
+            const code =
+              await sock.requestPairingCode(
+                phone
+              );
+
+            console.log('');
+            console.log(
+              '╔════════════════════════════════╗'
+            );
+            console.log(
+              '║     JAMIL AHMED SONG BOT       ║'
+            );
+            console.log(
+              '╠════════════════════════════════╣'
+            );
+            console.log(
+              '║ Pairing Code: ' + code
+            );
+            console.log(
+              '╚════════════════════════════════╝'
+            );
+            console.log('');
+          } catch (err) {
+            console.log(
+              '❌ Pairing error:',
+              err.message
+            );
+
+            pairingStarted = false;
+          }
         }
       }
-    });
+    );
 
-    // ==============================
-    // MESSAGE HANDLER
-    // ==============================
+    /*
+    ========================================
+    MESSAGE HANDLER
+    ========================================
+    */
 
     sock.ev.on(
       'messages.upsert',
       async ({ messages }) => {
         try {
-          const msg = messages[0];
+          const msg = messages?.[0];
 
-          if (!msg || !msg.message) return;
-          if (msg.key.fromMe) return;
+          if (!msg?.message) return;
+          if (msg.key?.fromMe) return;
 
-          const jid = msg.key.remoteJid;
+          const jid =
+            msg.key.remoteJid;
 
           const text =
             msg.message.conversation ||
             msg.message.extendedTextMessage?.text ||
             '';
 
-          const command = text.trim();
+          const command =
+            text.trim();
 
-          // ==============================
-          // .song TEST COMMAND
-          // ==============================
+          /*
+          ------------------------------------
+          .song TEST
+          ------------------------------------
+          */
 
-          if (command.toLowerCase().startsWith('.song ')) {
-            const url = command
-              .slice(6)
-              .trim();
+          if (
+            command
+              .toLowerCase()
+              .startsWith('.song ')
+          ) {
+            const value =
+              command
+                .slice(6)
+                .trim();
 
-            if (!/^https?:\/\//i.test(url)) {
-              await sock.sendMessage(jid, {
-                text:
-                  '❌ Use a valid direct MP3/audio URL.\n\n' +
-                  'Example:\n' +
-                  '.song https://example.com/song.mp3'
-              });
+            /*
+            For now this checks whether the
+            user supplied a direct audio URL.
+            */
+
+            if (
+              !/^https?:\/\//i.test(value)
+            ) {
+              await sock.sendMessage(
+                jid,
+                {
+                  text:
+                    '🎵 .song is online.\n\n' +
+                    'Name-based song search will be added next.\n\n' +
+                    'For the current test, use a direct audio URL.'
+                }
+              );
+
+              await sock.sendMessage(
+                jid,
+                {
+                  react: {
+                    text: '🎵',
+                    key: msg.key
+                  }
+                }
+              );
 
               return;
             }
 
-            // Processing reaction
-            await sock.sendMessage(jid, {
-              react: {
-                text: '⏳',
-                key: msg.key
+            await sock.sendMessage(
+              jid,
+              {
+                react: {
+                  text: '⏳',
+                  key: msg.key
+                }
               }
-            });
+            );
 
             try {
-              console.log(
-                '🎵 Downloading audio:',
-                url
-              );
-
               const response =
-                await fetch(url);
+                await fetch(value);
 
               if (!response.ok) {
                 throw new Error(
@@ -307,69 +388,75 @@ async function startBot() {
 
               if (
                 !contentType.includes('audio') &&
-                !url
+                !value
                   .toLowerCase()
                   .includes('.mp3')
               ) {
                 throw new Error(
-                  'URL is not a direct audio file'
+                  'Not a direct audio URL'
                 );
               }
 
-              const buffer = Buffer.from(
-                await response.arrayBuffer()
-              );
+              const buffer =
+                Buffer.from(
+                  await response.arrayBuffer()
+                );
 
               if (!buffer.length) {
                 throw new Error(
-                  'Empty audio file'
+                  'Empty audio'
                 );
               }
 
-              // 20 MB limit
               if (
                 buffer.length >
                 20 * 1024 * 1024
               ) {
                 throw new Error(
-                  'Audio file is larger than 20MB'
+                  'Audio is larger than 20MB'
                 );
               }
 
-              const filePath = path.join(
-                TEMP_DIR,
-                `song-${Date.now()}.mp3`
-              );
+              const filePath =
+                path.join(
+                  TEMP_DIR,
+                  `song-${Date.now()}.mp3`
+                );
 
               fs.writeFileSync(
                 filePath,
                 buffer
               );
 
-              console.log(
-                '📤 Sending audio...'
+              await sock.sendMessage(
+                jid,
+                {
+                  audio:
+                    fs.readFileSync(
+                      filePath
+                    ),
+                  mimetype:
+                    'audio/mpeg',
+                  fileName:
+                    'song.mp3',
+                  ptt: false
+                }
               );
 
-              await sock.sendMessage(jid, {
-                audio: fs.readFileSync(
-                  filePath
-                ),
-                mimetype: 'audio/mpeg',
-                fileName: 'song.mp3',
-                ptt: false
-              });
-
-              // Success reaction
-              await sock.sendMessage(jid, {
-                react: {
-                  text: '✅',
-                  key: msg.key
+              await sock.sendMessage(
+                jid,
+                {
+                  react: {
+                    text: '✅',
+                    key: msg.key
+                  }
                 }
-              });
+              );
 
-              // Delete temporary file
               try {
-                fs.unlinkSync(filePath);
+                fs.unlinkSync(
+                  filePath
+                );
               } catch {}
 
               console.log(
@@ -382,18 +469,23 @@ async function startBot() {
                 err.message
               );
 
-              await sock.sendMessage(jid, {
-                text:
-                  '❌ Song download/send failed.\n\n' +
-                  'Please use a direct MP3/audio URL.'
-              });
-
-              await sock.sendMessage(jid, {
-                react: {
-                  text: '❌',
-                  key: msg.key
+              await sock.sendMessage(
+                jid,
+                {
+                  text:
+                    '❌ Audio send failed.'
                 }
-              });
+              );
+
+              await sock.sendMessage(
+                jid,
+                {
+                  react: {
+                    text: '❌',
+                    key: msg.key
+                  }
+                }
+              );
             }
 
             return;
@@ -409,6 +501,8 @@ async function startBot() {
     );
 
   } catch (err) {
+    starting = false;
+
     console.log(
       '❌ Bot startup error:',
       err.message
@@ -420,11 +514,25 @@ async function startBot() {
   }
 }
 
+/*
+========================================
+START
+========================================
+*/
+
 console.log('');
-console.log('╔════════════════════════════════════╗');
-console.log('║     JAMIL AHMED SONG BOT          ║');
-console.log('║        Starting V1 Test           ║');
-console.log('╚════════════════════════════════════╝');
+console.log(
+  '╔════════════════════════════════════╗'
+);
+console.log(
+  '║     JAMIL AHMED SONG BOT          ║'
+);
+console.log(
+  '║          Starting...              ║'
+);
+console.log(
+  '╚════════════════════════════════════╝'
+);
 console.log('');
 
 startBot();
