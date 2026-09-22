@@ -16,10 +16,12 @@ const {
    CONFIG
 ========================================================= */
 
-const PORT = Number(process.env.PORT) || 10000;
+const PORT =
+  Number(process.env.PORT) || 10000;
 
 const PHONE_NUMBER =
-  (process.env.PAIR_PHONE || '').replace(/\D/g, '');
+  (process.env.PAIR_PHONE || '')
+    .replace(/\D/g, '');
 
 const AUTH_DIR =
   path.join(__dirname, 'auth_info');
@@ -36,18 +38,21 @@ fs.mkdirSync(TEMP_DIR, {
 });
 
 /* =========================================================
-   RENDER WEB SERVER
+   RENDER HTTP SERVER
 ========================================================= */
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8'
-  });
+const server = http.createServer(
+  (req, res) => {
+    res.writeHead(200, {
+      'Content-Type':
+        'text/plain; charset=utf-8'
+    });
 
-  res.end(
-    'Jamil Ahmed Song Bot is running.\n'
-  );
-});
+    res.end(
+      'Jamil Ahmed Song Bot is running.\n'
+    );
+  }
+);
 
 server.listen(
   PORT,
@@ -60,7 +65,7 @@ server.listen(
 );
 
 /* =========================================================
-   BOT STATE
+   STATE
 ========================================================= */
 
 let sock = null;
@@ -78,9 +83,12 @@ function sleep(ms) {
   });
 }
 
-function getDisconnectCode(lastDisconnect) {
+function getDisconnectCode(
+  lastDisconnect
+) {
   return (
-    lastDisconnect?.error?.output?.statusCode ||
+    lastDisconnect?.error?.output
+      ?.statusCode ||
     lastDisconnect?.error?.statusCode ||
     null
   );
@@ -94,7 +102,10 @@ function cleanupTemp() {
     for (const file of files) {
       try {
         fs.unlinkSync(
-          path.join(TEMP_DIR, file)
+          path.join(
+            TEMP_DIR,
+            file
+          )
         );
       } catch {}
     }
@@ -102,40 +113,230 @@ function cleanupTemp() {
 }
 
 /* =========================================================
-   SEARCH SONG
-   iTunes Search API
+   ITUNES SEARCH
+   Authorized music metadata + preview source
 ========================================================= */
 
 async function searchSong(query) {
-  const url =
-    'https://itunes.apple.com/search?' +
+  const params =
     new URLSearchParams({
       term: query,
       media: 'music',
       entity: 'song',
-      limit: '1'
-    }).toString();
+      limit: '10'
+    });
+
+  const apiUrl =
+    `https://itunes.apple.com/search?${params}`;
 
   const response =
-    await fetch(url);
+    await fetch(apiUrl);
 
   if (!response.ok) {
     throw new Error(
-      `Search HTTP ${response.status}`
+      `Music search HTTP ${response.status}`
     );
   }
 
   const data =
     await response.json();
 
-  if (
-    !data.results ||
-    !data.results.length
-  ) {
-    return null;
+  const results =
+    Array.isArray(data.results)
+      ? data.results
+      : [];
+
+  /*
+     Prefer a result that actually has
+     an audio preview.
+  */
+
+  const withPreview =
+    results.find(
+      item =>
+        item.previewUrl &&
+        item.trackName
+    );
+
+  return (
+    withPreview ||
+    results[0] ||
+    null
+  );
+}
+
+/* =========================================================
+   DOWNLOAD AUTHORIZED PREVIEW
+========================================================= */
+
+async function downloadPreview(
+  previewUrl,
+  outputPath
+) {
+  const response =
+    await fetch(previewUrl);
+
+  if (!response.ok) {
+    throw new Error(
+      `Audio HTTP ${response.status}`
+    );
   }
 
-  return data.results[0];
+  const contentType =
+    (
+      response.headers.get(
+        'content-type'
+      ) || ''
+    ).toLowerCase();
+
+  if (
+    !contentType.includes('audio')
+  ) {
+    throw new Error(
+      'Source did not return audio.'
+    );
+  }
+
+  const buffer =
+    Buffer.from(
+      await response.arrayBuffer()
+    );
+
+  if (!buffer.length) {
+    throw new Error(
+      'Audio preview is empty.'
+    );
+  }
+
+  /*
+     Safety limit.
+  */
+
+  if (
+    buffer.length >
+    20 * 1024 * 1024
+  ) {
+    throw new Error(
+      'Audio preview is too large.'
+    );
+  }
+
+  fs.writeFileSync(
+    outputPath,
+    buffer
+  );
+
+  return contentType;
+}
+
+/* =========================================================
+   SEND SONG PREVIEW
+========================================================= */
+
+async function sendSongPreview(
+  chatId,
+  msg,
+  song
+) {
+  let tempFile = null;
+
+  try {
+    const title =
+      song.trackName ||
+      'Unknown Song';
+
+    const artist =
+      song.artistName ||
+      'Unknown Artist';
+
+    const album =
+      song.collectionName ||
+      'Unknown Album';
+
+    const previewUrl =
+      song.previewUrl;
+
+    if (!previewUrl) {
+      throw new Error(
+        'No authorized audio preview is available.'
+      );
+    }
+
+    const safeName =
+      `${title} - ${artist}`
+        .replace(
+          /[<>:"/\\|?*\x00-\x1F]/g,
+          ''
+        )
+        .replace(
+          /\s+/g,
+          ' '
+        )
+        .trim()
+        .slice(0, 100) ||
+      'song';
+
+    tempFile =
+      path.join(
+        TEMP_DIR,
+        `song-${Date.now()}.m4a`
+      );
+
+    await downloadPreview(
+      previewUrl,
+      tempFile
+    );
+
+    await sock.sendMessage(
+      chatId,
+      {
+        audio: {
+          url: tempFile
+        },
+
+        mimetype:
+          'audio/mp4',
+
+        fileName:
+          `${safeName}.m4a`,
+
+        ptt: false,
+
+        caption:
+          `🎵 ${title}\n` +
+          `👤 ${artist}\n` +
+          `💿 ${album}\n\n` +
+          `©️ Music preview`
+      },
+      {
+        quoted: msg
+      }
+    );
+
+    await sock.sendMessage(
+      chatId,
+      {
+        react: {
+          text: '✅',
+          key: msg.key
+        }
+      }
+    );
+
+    console.log(
+      `✅ Song preview sent: ${title}`
+    );
+
+  } finally {
+    if (
+      tempFile &&
+      fs.existsSync(tempFile)
+    ) {
+      try {
+        fs.unlinkSync(tempFile);
+      } catch {}
+    }
+  }
 }
 
 /* =========================================================
@@ -155,12 +356,13 @@ async function startBot() {
     const {
       state,
       saveCreds
-    } = await useMultiFileAuthState(
-      AUTH_DIR
-    );
+    } =
+      await useMultiFileAuthState(
+        AUTH_DIR
+      );
 
     /* -----------------------------------------------------
-       LIVE WHATSAPP WEB VERSION
+       LIVE WA WEB VERSION
     ----------------------------------------------------- */
 
     let version = null;
@@ -170,7 +372,8 @@ async function startBot() {
         await fetchLatestWaWebVersion();
 
       if (live?.version) {
-        version = live.version;
+        version =
+          live.version;
 
         console.log(
           `🌐 Live WhatsApp Web version: ${version.join('.')}`
@@ -193,7 +396,8 @@ async function startBot() {
           await fetchLatestBaileysVersion();
 
         if (latest?.version) {
-          version = latest.version;
+          version =
+            latest.version;
 
           console.log(
             `📦 Baileys version: ${version.join('.')}`
@@ -208,7 +412,7 @@ async function startBot() {
     }
 
     /* -----------------------------------------------------
-       SOCKET CONFIG
+       SOCKET
     ----------------------------------------------------- */
 
     const config = {
@@ -229,13 +433,16 @@ async function startBot() {
 
       connectTimeoutMs: 60000,
 
-      defaultQueryTimeoutMs: 60000,
+      defaultQueryTimeoutMs:
+        60000,
 
-      keepAliveIntervalMs: 30000
+      keepAliveIntervalMs:
+        30000
     };
 
     if (version) {
-      config.version = version;
+      config.version =
+        version;
     }
 
     console.log(
@@ -275,7 +482,7 @@ async function startBot() {
         }
 
         /* -----------------------------------------------
-           PAIRING
+           PHONE PAIRING
         ------------------------------------------------ */
 
         if (
@@ -284,7 +491,8 @@ async function startBot() {
           !pairingRequested &&
           connection !== 'close'
         ) {
-          pairingRequested = true;
+          pairingRequested =
+            true;
 
           try {
             console.log('');
@@ -323,19 +531,22 @@ async function startBot() {
               err.message
             );
 
-            pairingRequested = false;
+            pairingRequested =
+              false;
           }
         }
 
         /* -----------------------------------------------
-           CONNECTED
+           OPEN
         ------------------------------------------------ */
 
         if (
           connection === 'open'
         ) {
           starting = false;
-          pairingRequested = false;
+
+          pairingRequested =
+            false;
 
           console.log('');
           console.log(
@@ -359,10 +570,18 @@ async function startBot() {
           console.log(
             '🎵 .song O Mahi'
           );
+
+          console.log(
+            '🎵 .play O Mahi'
+          );
+
+          console.log(
+            '🎵 .music O Mahi'
+          );
         }
 
         /* -----------------------------------------------
-           CLOSED
+           CLOSE
         ------------------------------------------------ */
 
         if (
@@ -377,7 +596,8 @@ async function startBot() {
 
           console.log(
             '❌ WhatsApp connection closed:',
-            statusCode || 'unknown'
+            statusCode ||
+              'unknown'
           );
 
           /* Logged out */
@@ -391,7 +611,7 @@ async function startBot() {
             );
 
             console.log(
-              '📱 Fresh pairing is required.'
+              '📱 Fresh pairing required.'
             );
 
             return;
@@ -403,24 +623,30 @@ async function startBot() {
             return;
           }
 
-          pairingRequested = false;
+          pairingRequested =
+            false;
 
           reconnectTimer =
-            setTimeout(() => {
-              reconnectTimer = null;
+            setTimeout(
+              () => {
+                reconnectTimer =
+                  null;
 
-              console.log(
-                '🔄 Reconnecting...'
-              );
-
-              startBot().catch(err => {
                 console.log(
-                  '❌ Reconnect error:',
-                  err.message
+                  '🔄 Reconnecting WhatsApp...'
                 );
-              });
 
-            }, 5000);
+                startBot().catch(
+                  err => {
+                    console.log(
+                      '❌ Reconnect error:',
+                      err.message
+                    );
+                  }
+                );
+              },
+              5000
+            );
         }
       }
     );
@@ -431,16 +657,16 @@ async function startBot() {
 
     sock.ev.on(
       'messages.upsert',
-      async ({ messages }) => {
+      async ({
+        messages
+      }) => {
         try {
           for (
-            const msg of messages || []
+            const msg of
+              messages || []
           ) {
-            if (!msg?.message) {
-              continue;
-            }
 
-            if (msg.key?.fromMe) {
+            if (!msg?.message) {
               continue;
             }
 
@@ -451,17 +677,37 @@ async function startBot() {
               continue;
             }
 
-            const text =
+            /*
+               IMPORTANT:
+
+               We intentionally DO NOT reject
+               msg.key.fromMe here.
+
+               Therefore commands sent from
+               the bot's own WhatsApp ID work.
+
+               Only actual dot-commands below
+               are processed, so normal bot
+               messages don't create loops.
+            */
+
+            const rawText =
               msg.message?.conversation ||
-              msg.message?.extendedTextMessage?.text ||
-              msg.message?.imageMessage?.caption ||
-              msg.message?.videoMessage?.caption ||
+              msg.message
+                ?.extendedTextMessage
+                ?.text ||
+              msg.message
+                ?.imageMessage
+                ?.caption ||
+              msg.message
+                ?.videoMessage
+                ?.caption ||
               '';
 
-            const command =
-              text.trim();
+            const cleanText =
+              rawText.trim();
 
-            if (!command) {
+            if (!cleanText) {
               continue;
             }
 
@@ -470,32 +716,39 @@ async function startBot() {
             ============================================= */
 
             if (
-              command.toLowerCase() ===
-              '.ping'
+              /^\.ping$/i.test(
+                cleanText
+              )
             ) {
               const start =
                 Date.now();
 
-              await sock.sendMessage(
-                jid,
-                {
-                  react: {
-                    text: '🏓',
-                    key: msg.key
+              try {
+                await sock.sendMessage(
+                  jid,
+                  {
+                    react: {
+                      text: '🏓',
+                      key: msg.key
+                    }
                   }
-                }
-              );
+                );
+              } catch {}
 
-              const ms =
-                Date.now() - start;
+              const latency =
+                Date.now() -
+                start;
 
               await sock.sendMessage(
                 jid,
                 {
                   text:
                     `🏓 Pong!\n\n` +
-                    `⚡ Response: ${ms}ms\n` +
+                    `⚡ ${latency}ms\n` +
                     `🤖 Jamil Ahmed Song Bot`
+                },
+                {
+                  quoted: msg
                 }
               );
 
@@ -503,36 +756,19 @@ async function startBot() {
             }
 
             /* =============================================
-               SONG
-               .song O Mahi
+               SONG / PLAY / MUSIC
             ============================================= */
 
-            if (
-              command
-                .toLowerCase()
-                .startsWith('.song')
-            ) {
+            const songMatch =
+              cleanText.match(
+                /^\.(song|play|music)\s+(.+)$/i
+              );
+
+            if (songMatch) {
               const query =
-                command
-                  .slice(5)
-                  .trim();
+                songMatch[2].trim();
 
-              /* -------------------------------------------
-                 NO QUERY
-              -------------------------------------------- */
-
-              if (!query) {
-                await sock.sendMessage(
-                  jid,
-                  {
-                    text:
-                      '🎵 Song Search\n\n' +
-                      'Use:\n' +
-                      '.song O Mahi\n\n' +
-                      'You can also use a direct audio URL.'
-                  }
-                );
-
+              try {
                 await sock.sendMessage(
                   jid,
                   {
@@ -542,74 +778,71 @@ async function startBot() {
                     }
                   }
                 );
+              } catch {}
 
-                continue;
-              }
-
-              /* -------------------------------------------
-                 DIRECT AUDIO URL
-              -------------------------------------------- */
-
-              if (
-                /^https?:\/\//i.test(
-                  query
-                )
-              ) {
-                await sendDirectAudio(
+              if (!query) {
+                await sock.sendMessage(
                   jid,
-                  msg,
-                  query
+                  {
+                    text:
+                      '📛 ᴜsᴀɢᴇ:\n' +
+                      '• .sᴏɴɢ <sᴏɴɢ ɴᴀᴍᴇ>\n' +
+                      '• .ᴘʟᴀʏ <sᴏɴɢ ɴᴀᴍᴇ>\n' +
+                      '• .ᴍᴜsɪᴄ <sᴏɴɢ ɴᴀᴍᴇ>'
+                  },
+                  {
+                    quoted: msg
+                  }
                 );
 
                 continue;
               }
 
-              /* -------------------------------------------
-                 SONG SEARCH
-              -------------------------------------------- */
-
-              await sock.sendMessage(
-                jid,
-                {
-                  react: {
-                    text: '🔎',
-                    key: msg.key
-                  }
-                }
-              );
-
-              await sock.sendMessage(
-                jid,
-                {
-                  text:
-                    `🔎 Searching: ${query}`
-                }
-              );
+              let statusMsg =
+                null;
 
               try {
+                /* -----------------------------------------
+                   SEARCH STATUS
+                ----------------------------------------- */
+
+                statusMsg =
+                  await sock.sendMessage(
+                    jid,
+                    {
+                      text:
+                        '🎵 ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ...\n\n' +
+                        '🔎 sᴇᴀʀᴄɪɴɢ : ' +
+                        query
+                    },
+                    {
+                      quoted: msg
+                    }
+                  );
+
+                /* -----------------------------------------
+                   SEARCH
+                ----------------------------------------- */
+
                 const song =
                   await searchSong(
                     query
                   );
 
                 if (!song) {
-                  await sock.sendMessage(
-                    jid,
-                    {
-                      text:
-                        '❌ Song not found.'
-                    }
-                  );
-
-                  await sock.sendMessage(
-                    jid,
-                    {
-                      react: {
-                        text: '❌',
-                        key: msg.key
+                  if (
+                    statusMsg?.key
+                  ) {
+                    await sock.sendMessage(
+                      jid,
+                      {
+                        text:
+                          '❌ sᴏɴɢ ɴᴏᴛ ғᴏᴜɴᴅ',
+                        edit:
+                          statusMsg.key
                       }
-                    }
-                  );
+                    );
+                  }
 
                   continue;
                 }
@@ -622,80 +855,120 @@ async function startBot() {
                   song.artistName ||
                   'Unknown Artist';
 
-                const album =
-                  song.collectionName ||
-                  'Unknown Album';
+                /* -----------------------------------------
+                   NO PREVIEW
+                ----------------------------------------- */
 
-                const preview =
-                  song.previewUrl;
-
-                if (!preview) {
-                  await sock.sendMessage(
-                    jid,
-                    {
-                      text:
-                        `🎵 Found:\n\n` +
-                        `🎶 ${title}\n` +
-                        `👤 ${artist}\n` +
-                        `💿 ${album}\n\n` +
-                        `❌ Audio preview unavailable.`
-                    }
-                  );
+                if (
+                  !song.previewUrl
+                ) {
+                  if (
+                    statusMsg?.key
+                  ) {
+                    await sock.sendMessage(
+                      jid,
+                      {
+                        text:
+                          `❌ ᴀᴜᴅɪᴏ ᴘʀᴇᴠɪᴇᴡ ɴᴇɪ\n\n` +
+                          `🎵 ${title}\n` +
+                          `👤 ${artist}`,
+                        edit:
+                          statusMsg.key
+                      }
+                    );
+                  }
 
                   continue;
                 }
 
-                await sock.sendMessage(
-                  jid,
-                  {
-                    text:
-                      `🎵 ${title}\n` +
-                      `👤 ${artist}\n` +
-                      `💿 ${album}\n\n` +
-                      `⏳ Sending audio...`
-                  }
-                );
+                /* -----------------------------------------
+                   STATUS UPDATE
+                ----------------------------------------- */
 
-                await sendDirectAudio(
+                if (
+                  statusMsg?.key
+                ) {
+                  await sock.sendMessage(
+                    jid,
+                    {
+                      text:
+                        '⬇️ ᴀᴜᴅɪᴏ ᴘʀᴇᴘᴀʀɪɴɢ...\n\n' +
+                        `🎵 ${title}\n` +
+                        `👤 ${artist}`,
+                      edit:
+                        statusMsg.key
+                    }
+                  );
+                }
+
+                /* -----------------------------------------
+                   SEND
+                ----------------------------------------- */
+
+                await sendSongPreview(
                   jid,
                   msg,
-                  preview,
-                  {
-                    title,
-                    artist
-                  }
+                  song
                 );
 
-              } catch (err) {
-                console.log(
-                  '❌ Search error:',
-                  err.message
-                );
+                /* -----------------------------------------
+                   FINAL STATUS
+                ----------------------------------------- */
 
-                await sock.sendMessage(
-                  jid,
-                  {
-                    text:
-                      '❌ Song search failed.\n\n' +
-                      err.message
-                  }
-                );
-
-                await sock.sendMessage(
-                  jid,
-                  {
-                    react: {
-                      text: '❌',
-                      key: msg.key
+                if (
+                  statusMsg?.key
+                ) {
+                  await sock.sendMessage(
+                    jid,
+                    {
+                      text:
+                        '✅ ᴀᴜᴅɪᴏ sᴇɴᴛ\n\n' +
+                        `🎵 ${title}`,
+                      edit:
+                        statusMsg.key
                     }
-                  }
+                  );
+                }
+
+              } catch (songErr) {
+                console.log(
+                  '❌ Song command error:',
+                  songErr?.message ||
+                    songErr
                 );
+
+                try {
+                  if (
+                    statusMsg?.key
+                  ) {
+                    await sock.sendMessage(
+                      jid,
+                      {
+                        text:
+                          '❌ ᴍᴜsɪᴄ ᴘʀᴇᴠɪᴇᴡ ғᴀɪʟᴇᴅ\n\n' +
+                          '🎵 ᴏᴛʜᴇʀ sᴏɴɢ ɴᴀᴍᴇ ᴅɪʏᴇ ᴛʀʏ ᴋᴏʀᴏ.',
+                        edit:
+                          statusMsg.key
+                      }
+                    );
+                  } else {
+                    await sock.sendMessage(
+                      jid,
+                      {
+                        text:
+                          '❌ ᴍᴜsɪᴄ sᴇᴀʀᴄʜ ғᴀɪʟᴇᴅ'
+                      },
+                      {
+                        quoted: msg
+                      }
+                    );
+                  }
+                } catch {}
               }
 
               continue;
             }
           }
-
         } catch (err) {
           console.log(
             '❌ Message handler error:',
@@ -715,176 +988,18 @@ async function startBot() {
 
     if (!reconnectTimer) {
       reconnectTimer =
-        setTimeout(() => {
-          reconnectTimer = null;
+        setTimeout(
+          () => {
+            reconnectTimer =
+              null;
 
-          startBot().catch(() => {});
-        }, 5000);
-    }
-  }
-}
-
-/* =========================================================
-   DIRECT AUDIO SENDER
-========================================================= */
-
-async function sendDirectAudio(
-  jid,
-  msg,
-  url,
-  info = {}
-) {
-  const filePath =
-    path.join(
-      TEMP_DIR,
-      `song-${Date.now()}.mp3`
-    );
-
-  try {
-    await sock.sendMessage(
-      jid,
-      {
-        react: {
-          text: '⏳',
-          key: msg.key
-        }
-      }
-    );
-
-    console.log(
-      '🎵 Fetching audio...'
-    );
-
-    const response =
-      await fetch(url);
-
-    if (!response.ok) {
-      throw new Error(
-        `HTTP ${response.status}`
-      );
-    }
-
-    const contentType =
-      (
-        response.headers.get(
-          'content-type'
-        ) || ''
-      ).toLowerCase();
-
-    const buffer =
-      Buffer.from(
-        await response.arrayBuffer()
-      );
-
-    if (!buffer.length) {
-      throw new Error(
-        'Empty audio'
-      );
-    }
-
-    /*
-       20 MB safety limit
-    */
-
-    if (
-      buffer.length >
-      20 * 1024 * 1024
-    ) {
-      throw new Error(
-        'Audio is larger than 20MB'
-      );
-    }
-
-    fs.writeFileSync(
-      filePath,
-      buffer
-    );
-
-    const title =
-      info.title || 'song';
-
-    const artist =
-      info.artist || '';
-
-    const caption =
-      artist
-        ? `🎵 ${title}\n👤 ${artist}`
-        : `🎵 ${title}`;
-
-    await sock.sendMessage(
-      jid,
-      {
-        audio:
-          fs.readFileSync(
-            filePath
-          ),
-
-        mimetype:
-          contentType.includes(
-            'audio/ogg'
-          )
-            ? 'audio/ogg'
-            : 'audio/mpeg',
-
-        fileName:
-          `${title
-            .replace(/[\\/:*?"<>|]/g, '')
-            .slice(0, 80)}.mp3`,
-
-        ptt: false,
-
-        caption
-      }
-    );
-
-    await sock.sendMessage(
-      jid,
-      {
-        react: {
-          text: '✅',
-          key: msg.key
-        }
-      }
-    );
-
-    console.log(
-      '✅ Audio sent successfully.'
-    );
-
-  } catch (err) {
-    console.log(
-      '❌ Audio error:',
-      err.message
-    );
-
-    await sock.sendMessage(
-      jid,
-      {
-        text:
-          `❌ Audio send failed.\n\n${err.message}`
-      }
-    );
-
-    await sock.sendMessage(
-      jid,
-      {
-        react: {
-          text: '❌',
-          key: msg.key
-        }
-      }
-    );
-
-  } finally {
-    try {
-      if (
-        fs.existsSync(filePath)
-      ) {
-        fs.unlinkSync(
-          filePath
+            startBot().catch(
+              () => {}
+            );
+          },
+          5000
         );
-      }
-    } catch {}
+    }
   }
 }
 
@@ -913,7 +1028,7 @@ if (!PHONE_NUMBER) {
   );
 } else {
   console.log(
-    '📱 Phone pairing is configured.'
+    '📱 Phone pairing configured.'
   );
 }
 
