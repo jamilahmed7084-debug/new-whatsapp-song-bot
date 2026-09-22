@@ -1,0 +1,17 @@
+{
+  "name": "new-whatsapp-song-bot",
+  "version": "1.0.0",
+  "description": "Simple WhatsApp MP3 test bot",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.23",
+    "pino": "^9.0.0"
+  }
+}
